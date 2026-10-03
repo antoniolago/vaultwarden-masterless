@@ -428,6 +428,15 @@ async function loginOnce(
     page.on('console', onConsole);
     page.on('pageerror', onPageError);
 
+    // The token exchange is the only proof that the callback was processed. The promise is
+    // created here — with the other listeners, before the callback URL is even visited — so an
+    // exchange that lands early is still awaited, and one that never lands ends as `null`
+    // instead of a bare timeout.
+    const tokenExchange: Promise<any | null> = page.waitForResponse(
+        (res: any) => String(res.url()).includes('/identity/connect/token'),
+        { timeout: 60_000 },
+    ).catch(() => null);
+
 
     await cleanLanding(page);
 
@@ -475,22 +484,34 @@ async function loginOnce(
         );
     }
 
-    // Remember the callback URL: the SPA may miss it if its bundle is still booting
-    // (slow runner), which loses the code and drops the user on /#/login without any
-    // console error. Keep it around so the flow can be retried.
+    // The callback URL the SPA has to process — kept for the failure message below.
     const callbackUrl = page.url();
 
-    // The SPA lands on `/#/sso?code=…&state=…` and performs the token exchange itself.
-    try {
-        await page.waitForFunction(
-            () => !location.hash.startsWith('#/sso'),
-            undefined,
-            { timeout: 60_000 },
-        );
-    } catch {
+    // Wait for the exchange ITSELF — the `POST /identity/connect/token` — and not for the
+    // route to change.
+    //
+    // Measured on a GitHub runner (2026-10) with the Playwright trace: the SPA rewrites its
+    // URL while the bundle boots, so a wait that stops at `!hash.startsWith('#/sso')`
+    // resolves *before* the exchange. The steps below then navigate away and tear the SPA
+    // down mid-callback, which produced 10 failing tests with **zero** POSTs to the token
+    // endpoint and a message that blamed the session instead of naming the missing exchange.
+    // The promise is created with the other listeners (further up) so a fast exchange cannot
+    // slip past between the callback and this await.
+    const tokenResponse = await tokenExchange;
+
+    if (tokenResponse === null) {
         throw new Error(
-            `[ssoLogin] still on the SSO callback route (${page.url()}) after 60s — ` +
-            `the token exchange never completed. Browser errors: ${consoleErrors.slice(-6).join(' | ') || '(none captured)'}`,
+            `[ssoLogin] the SSO callback was not exchanged: no POST /identity/connect/token ` +
+            `within 60s (page is on ${page.url()}, callback was ${callbackUrl}). ` +
+            `Browser errors: ${consoleErrors.slice(-6).join(' | ') || '(none captured)'} || ` +
+            `Trail: ${warnings.slice(-12).join(' | ') || '(nothing captured)'}`,
+        );
+    }
+    if (tokenResponse.status() !== 200) {
+        const body = await tokenResponse.text().catch(() => '(body unreadable)');
+        throw new Error(
+            `[ssoLogin] the token exchange answered HTTP ${tokenResponse.status()} ` +
+            `(page on ${page.url()}): ${body.slice(0, 300)}`,
         );
     }
 
@@ -631,11 +652,12 @@ export function skipIfSsoUnusable() {
 /**
  * Log in through the proxy's SSO flow (Keycloak), with one retry.
  *
- * On the CI runner the SPA sometimes misses the callback route on a cold start: the
- * login ends on `/#/login` without any console error and with **zero** POSTs of the
- * token request in Vaultwarden's log (measured: 14 logins, 0 requests). The SSO code
- * is still unexchanged in that case, so a second attempt — with the app already
- * booted and its assets warm — is tried before the failure is real.
+ * The retry is cheap insurance for a transient failure, not a workaround for a known one: the
+ * 2026-10 failures on the CI runner (login ends on `/#/login`, no console error, **zero** POSTs
+ * of the token request in Vaultwarden's log) were caused by this helper's own readiness check
+ * navigating away before the exchange — see the wait in `loginOnce`, which now keys off the
+ * token response instead of the route. Keep the retry, but do not read it as an explanation:
+ * if it ever fires for the whole run, the exchange is still broken and the error names it.
  */
 export async function ssoLogin(
     page: Page,
@@ -659,7 +681,7 @@ export async function ssoLogin(
         await loginOnce(page, user);
     } catch (error) {
         const message = String((error as Error)?.message ?? error);
-        if (!/dropped the session|SSO callback route|login page/i.test(message)) {
+        if (!/dropped the session|SSO callback|login page|token exchange|was not exchanged/i.test(message)) {
             throw error;
         }
         console.log(`[ssoLogin] first attempt failed (${message.slice(0, 180)}) — retrying once with the app warm`);

@@ -178,7 +178,9 @@ test.describe('Vaultwarden Masterless Item Flows', () => {
             await page.locator('textarea').first().fill(sensitiveData);
             await page.getByRole('button', { name: /^Save$/i }).click();
             await page.waitForLoadState('networkidle');
-            await expect(page.getByText('SensitiveNote')).toBeVisible({ timeout: 10_000 });
+            // Scope to the list row: `getByText('SensitiveNote')` matches both the row and the
+            // item's detail heading (strict-mode violation) once the dialog renders.
+            await expect(utils.vaultItemRow(page, 'SensitiveNote')).toBeVisible({ timeout: 10_000 });
         });
 
         await test.step('Verify sensitive data is encrypted in transit', async () => {
