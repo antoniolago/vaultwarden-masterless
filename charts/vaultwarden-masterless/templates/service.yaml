@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "vaultwarden-masterless.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

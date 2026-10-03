@@ -1,0 +1,33 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Rust build artifacts
+/target
+
+# Local data: keys, databases, env
+/data
+.env
+*.pem
+*.pfx
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Node / E2E
+node_modules
+
+# Local debugging scratch (never commit)
+debug-sso
+debug-*
+tmp
+*screenshots*
+build.log
+test-results/
+caveman.json
+
+# AI agent working state (planning, evidence, notifies)
+.sisyphus/
+.omo/
+.opencode/
+.sso-unusable

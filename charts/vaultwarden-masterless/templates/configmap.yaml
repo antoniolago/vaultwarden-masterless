@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-config
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+data:
+  HOST: {{ .Values.config.host | quote }}
+  PORT: {{ .Values.config.port | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  DATABASE_PATH: {{ .Values.config.databasePath | quote }}
+  RSA_PRIVATE_KEY_FILE: "/secrets/rsa/rsa_private.pem"
+  RSA_PUBLIC_KEY_FILE: "/secrets/rsa/rsa_public.pem"
+  {{- if .Values.vaultwarden.enabled }}
+  VAULTWARDEN_RSA_PUBLIC_KEY_FILE: "/secrets/rsa/vw_rsa_key.pub.pem"
+  VAULTWARDEN_URL: {{ printf "http://%s-vaultwarden:80" (include "vaultwarden-masterless.fullname" .) | quote }}
+  {{- if .Values.vaultwarden.domain }}
+  DOMAIN: {{ .Values.vaultwarden.domain | quote }}
+  {{- end }}
+  {{- else }}
+  VAULTWARDEN_RSA_PUBLIC_KEY_FILE: "/secrets/vw-rsa/rsa_key.pub.pem"
+  VAULTWARDEN_URL: {{ .Values.config.vaultwardenUrl | quote }}
+  {{- if .Values.config.domain }}
+  DOMAIN: {{ .Values.config.domain | quote }}
+  {{- end }}
+  {{- end }}
+  PROXY_ENABLED: {{ .Values.config.proxyEnabled | quote }}
+  USER_KEYS_URL: {{ .Values.config.userKeysUrl | quote }}
+  ROTATION_INTERVAL_HOURS: {{ .Values.config.rotationIntervalHours | quote }}
+  {{- if .Values.config.syntheticOrgName }}
+  SYNTHETIC_ORG_NAME: {{ .Values.config.syntheticOrgName | quote }}
+  {{- end }}
+  {{- if .Values.config.syntheticOrgIdentifier }}
+  SYNTHETIC_ORG_IDENTIFIER: {{ .Values.config.syntheticOrgIdentifier | quote }}
+  {{- end }}
+  BUILD_SHA: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
+  COMPAT_VW_VERSION: {{ .Values.config.compatVwVersion | default "1.37.3" | quote }}
+  COMPAT_KC_VERSION: {{ .Values.config.compatKcVersion | default "26.3.4" | quote }}
+  COMPAT_CLIENTS: {{ .Values.config.compatClients | quote }}
+  COMPAT_LAST_TESTED: {{ .Values.config.compatLastTested | default "2026-09-18" | quote }}
+  COMPAT_STATUS_URL: {{ .Values.config.compatStatusUrl | quote }}

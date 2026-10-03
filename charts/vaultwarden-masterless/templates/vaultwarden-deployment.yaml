@@ -1,0 +1,121 @@
+{{- if .Values.vaultwarden.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-vaultwarden
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vaultwarden
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "vaultwarden-masterless.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: vaultwarden
+  template:
+    metadata:
+      labels:
+        {{- include "vaultwarden-masterless.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: vaultwarden
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        # Copy the pre-generated VW RSA key into VW's data directory.
+        # Vaultwarden uses /data/rsa_key.pem — if present, it skips generation.
+        - name: copy-rsa-key
+          image: alpine:3.20
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Copying pre-generated RSA key to VW data dir..."
+              cp -f /keys/vw_rsa_key.pem /data/rsa_key.pem
+              chmod 600 /data/rsa_key.pem
+          volumeMounts:
+            - name: rsa-keys
+              mountPath: /keys
+              readOnly: true
+            - name: vw-data
+              mountPath: /data
+      containers:
+        - name: vaultwarden
+          image: "{{ .Values.vaultwarden.image.repository }}:{{ .Values.vaultwarden.image.tag }}"
+          imagePullPolicy: {{ .Values.vaultwarden.image.pullPolicy }}
+          ports:
+            - containerPort: 80
+              name: http
+          env:
+            - name: DOMAIN
+              value: {{ .Values.vaultwarden.domain | quote }}
+            - name: SIGNUPS_ALLOWED
+              value: {{ .Values.vaultwarden.signupsAllowed | quote }}
+            - name: ADMIN_TOKEN
+              {{- if .Values.vaultwarden.adminToken.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vaultwarden.adminToken.existingSecret }}
+                  key: {{ .Values.vaultwarden.adminToken.key | default "ADMIN_TOKEN" }}
+              {{- else }}
+              value: {{ .Values.vaultwarden.adminToken.value | quote }}
+              {{- end }}
+            - name: LOG_LEVEL
+              value: {{ .Values.vaultwarden.logLevel | quote }}
+            - name: SSO_ENABLED
+              value: "true"
+            - name: SSO_ONLY
+              value: {{ .Values.vaultwarden.ssoOnly | quote }}
+            - name: SSO_CLIENT_ID
+              value: {{ .Values.vaultwarden.sso.clientId | quote }}
+            - name: SSO_CLIENT_SECRET
+              {{- if .Values.vaultwarden.sso.clientSecret.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vaultwarden.sso.clientSecret.existingSecret }}
+                  key: {{ .Values.vaultwarden.sso.clientSecret.key | default "SSO_CLIENT_SECRET" }}
+              {{- else }}
+              value: {{ .Values.vaultwarden.sso.clientSecret.value | quote }}
+              {{- end }}
+            - name: SSO_AUTHORITY
+              value: {{ .Values.vaultwarden.sso.authority | quote }}
+            - name: SSO_PKCE
+              value: {{ .Values.vaultwarden.sso.pkce | quote }}
+            - name: ROCKET_ADDRESS
+              value: "0.0.0.0"
+            - name: ROCKET_PORT
+              value: "80"
+            {{- range $key, $value := .Values.vaultwarden.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- if .Values.vaultwarden.databaseUrl.existingSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vaultwarden.databaseUrl.existingSecret }}
+                  key: {{ .Values.vaultwarden.databaseUrl.key }}
+            {{- end }}
+          volumeMounts:
+            - name: vw-data
+              mountPath: /data
+          {{- with .Values.vaultwarden.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: vw-data
+          {{- if .Values.vaultwarden.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.vaultwarden.persistence.existingClaim | default (printf "%s-vaultwarden-data" (include "vaultwarden-masterless.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: rsa-keys
+          secret:
+            secretName: {{ include "vaultwarden-masterless.rsaSecretName" . }}
+{{- end }}

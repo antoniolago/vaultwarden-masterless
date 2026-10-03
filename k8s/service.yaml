@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vw-masterless
+  namespace: vaultwarden
+  labels:
+    app.kubernetes.io/name: vw-masterless
+    app.kubernetes.io/component: masterless
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vw-masterless
+  ports:
+    - name: http
+      port: 8484
+      targetPort: http
+      protocol: TCP

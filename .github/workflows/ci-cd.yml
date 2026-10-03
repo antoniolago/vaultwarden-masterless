@@ -1,0 +1,494 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  # Nightly: also exercise upstream `testing` so a breaking Vaultwarden release
+  # shows up here before it reaches an instance.
+  schedule:
+    - cron: "0 6 * * *"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CHART_PATH: charts/vaultwarden-masterless
+
+jobs:
+  # Unit Tests
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run unit tests
+        run: cargo test --all
+
+  # Browserless end-to-end check of the passwordless flow — the release gate.
+  #
+  # The Playwright suites need a browser and are treated as signals; this one walks the
+  # very same SSO / Key Connector protocol with plain HTTP, so a failure here is a failure
+  # of the code under test. It asserts what the product promises
+  # (UserDecryptionOptions.KeyConnectorOption, HasMasterPassword: false,
+  # keyConnectorUnlock, usesKeyConnector) and that the stored user key comes back —
+  # including on a *refreshed* session, which is what every mobile app does on restart.
+  smoke:
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clean leftover e2e containers
+        working-directory: e2e-tests
+        run: |
+          docker compose -f docker-compose.e2e.yml --env-file test.env \
+            --profile e2e --profile keycloak --profile vaultwarden down -v --remove-orphans || true
+          docker rm -fv $(docker ps -aq --filter "name=e2e_") 2>/dev/null || true
+          docker volume rm e2e_keys 2>/dev/null || true
+          docker ps -a --filter "name=e2e_"
+
+      - name: Build E2E image
+        run: docker compose -f e2e-tests/docker-compose.e2e.yml build MasterlessPrebuild
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: e2e-tests
+        run: bun install --frozen-lockfile
+
+      # Global setup generates the RSA/TLS material, seeds the keys volume and builds the
+      # Keycloak setup image; the sso-setup project brings Keycloak up and creates the
+      # realm, the OIDC client and the test user. Neither needs a browser context.
+      - name: Start Keycloak and the realm
+        working-directory: e2e-tests
+        run: bunx playwright test --project=sso-setup
+
+      - name: Start Vaultwarden and the proxy
+        working-directory: e2e-tests
+        run: |
+          docker compose -f docker-compose.e2e.yml --profile e2e --env-file test.env up -d Vaultwarden Masterless
+          # /alive only proves the proxy is up: the first call that needs Vaultwarden answers 502
+          # until Vaultwarden itself is ready. Wait for the line the proxy logs once it has
+          # reached Vaultwarden, then for the SSO endpoint to stop 502-ing.
+          for _ in $(seq 1 90); do
+            docker logs e2e_masterless-e2e 2>&1 | grep -q "detected — matches" && break
+            sleep 2
+          done
+          for _ in $(seq 1 30); do
+            code=$(curl -sk -o /dev/null -w "%{http_code}" -m 5 "https://127.0.0.1:18443/identity/sso/prevalidate?domainHint=readiness")
+            [ "$code" != "502" ] && [ "$code" != "000" ] && break
+            sleep 2
+          done
+          curl -sk -o /dev/null -w "masterless /alive => HTTP %{http_code}\n" -m 10 https://127.0.0.1:18443/alive
+
+      - name: Run the browserless SSO smoke test
+        working-directory: e2e-tests
+        env:
+          # The local stack serves a self-signed certificate.
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+          SMOKE_BASE: https://127.0.0.1:18443
+          SMOKE_KC: http://127.0.0.1:18080
+          SMOKE_REALM: test
+          SMOKE_USER: test
+          SMOKE_PASS: test
+          SMOKE_ORG: "00000000-01DC-01DC-01DC-000000000000"
+          # the stack's account is disposable, so the smoke can enrol a throwaway key and
+          # assert the full round-trip on a refreshed session (never on a live account)
+          SMOKE_ENROLL: "1"
+        run: node smoke/sso-smoke.mjs
+
+      - name: Container logs (on failure)
+        if: failure()
+        working-directory: e2e-tests
+        run: |
+          echo "===== masterless ====="
+          docker logs e2e_masterless-e2e 2>&1 | tail -80 || true
+          echo "===== vaultwarden ====="
+          docker logs e2e_vaultwarden-e2e 2>&1 | tail -80 || true
+
+  # Docker Build for E2E — single-platform image shared with e2e-tests
+  docker-build-e2e:
+    runs-on: ubuntu-latest
+    needs: []  # E2E builds compile Rust independently; no need to wait for unit-tests
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and save image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: e2e_masterless_prebuilt
+          cache-from: type=gha,scope=build-linux-amd64
+          cache-to: type=gha,mode=max,scope=build-linux-amd64
+
+      - name: Export image to artifact
+        run: docker save e2e_masterless_prebuilt | gzip > /tmp/masterless.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: masterless-image
+          path: /tmp/masterless.tar.gz
+          retention-days: 1
+
+  # E2E Tests — sharded across 2 parallel CI jobs.
+  #
+  # All Playwright projects share the same Vaultwarden (:18000) and Masterless
+  # (:18443) containers via `network_mode: "host"`, so they CANNOT run in
+  # parallel on the same host.  CI-level sharding gives each job its own
+  # runner (own ports), eliminating contention.
+  #
+  # Each shard runs ~3 projects + shared sso-setup/sso-teardown.
+  # Expected wall time: ~8 min/shard (vs ~15 min for a single runner).
+  e2e-tests:
+    runs-on: ubuntu-latest
+    needs: docker-build-e2e
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download pre-built image
+        uses: actions/download-artifact@v4
+        with:
+          name: masterless-image
+          path: /tmp/
+
+      - name: Load pre-built image
+        run: docker load < /tmp/masterless.tar.gz
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: e2e-tests
+        run: bun install --frozen-lockfile
+
+      - name: Get Playwright version
+        id: pw-version
+        working-directory: e2e-tests
+        run: echo "version=$(bunx playwright --version | sed 's/Version //')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: cache-playwright
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-firefox-${{ steps.pw-version.outputs.version }}
+
+      - name: Install Playwright browsers (full)
+        if: steps.cache-playwright.outputs.cache-hit != 'true'
+        working-directory: e2e-tests
+        run: bunx playwright install --with-deps firefox
+
+      - name: Install Playwright browser deps (cache hit)
+        if: steps.cache-playwright.outputs.cache-hit == 'true'
+        working-directory: e2e-tests
+        run: bunx playwright install-deps firefox
+
+      - name: Run E2E tests (shard ${{ matrix.shard }})
+        working-directory: e2e-tests
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          case "${SHARD}" in
+            1) PROJECTS="sso-e2e security vault-e2e" ;;
+            2) PROJECTS="proxy-patching key-connector-flow item-lifecycle attest" ;;
+          esac
+          for p in ${PROJECTS}; do PW_ARGS="${PW_ARGS} --project=${p}"; done
+          echo "Running shard ${SHARD}:${PW_ARGS}"
+          bunx playwright test ${PW_ARGS}
+
+      - name: Docker container logs (on failure)
+        if: failure()
+        working-directory: e2e-tests
+        run: |
+          echo "=== Keycloak ==="
+          docker logs e2e_keycloak-e2e 2>&1 | tail -80 || true
+          echo "=== KeycloakSetup ==="
+          docker logs e2e_keycloakSetup-e2e 2>&1 | tail -40 || true
+          echo "=== Vaultwarden ==="
+          docker logs e2e_vaultwarden-e2e 2>&1 | tail -40 || true
+          echo "=== Masterless ==="
+          docker logs e2e_masterless-e2e 2>&1 | tail -40 || true
+          echo "=== Docker ps ==="
+          docker ps -a --filter "name=e2e_" || true
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-${{ matrix.shard }}
+          path: e2e-tests/playwright-report/
+          retention-days: 14
+
+      - name: Upload test traces (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-traces-${{ matrix.shard }}
+          path: e2e-tests/test-results/
+          retention-days: 7
+
+  # Vaultwarden version compatibility (nightly)
+  #
+  # This proxy patches Vaultwarden API responses, so a Vaultwarden release can break it
+  # without anything changing here. The nightly run exercises the SSO + patching suites
+  # against the versions listed in COMPATIBILITY.md and against upstream `testing`.
+  #
+  # max-parallel: 1 — every container uses host networking on the same fixed ports, so two
+  # matrix entries must never overlap. `continue-on-error` keeps this a *signal*: the
+  # release gates on `unit-tests` and `smoke`, and a nightly failure here is reported, not
+  # hidden, without freezing publishing.
+  vw-compat:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    needs: [unit-tests]
+    continue-on-error: true
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - vw: "1.36.0"
+          - vw: "1.37.3"
+          # Upstream tip of the tree: a failure here is information, not a gate.
+          - vw: "testing"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clean leftover e2e containers
+        working-directory: e2e-tests
+        run: |
+          docker compose -f docker-compose.e2e.yml --env-file test.env \
+            --profile e2e --profile keycloak --profile vaultwarden down -v --remove-orphans || true
+          docker rm -fv $(docker ps -aq --filter "name=e2e_") 2>/dev/null || true
+          docker volume rm e2e_keys 2>/dev/null || true
+
+      - name: Build E2E image
+        run: docker compose -f e2e-tests/docker-compose.e2e.yml build MasterlessPrebuild
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: e2e-tests
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        working-directory: e2e-tests
+        run: bunx playwright install --with-deps firefox
+
+      - name: Run E2E against Vaultwarden ${{ matrix.vw }}
+        working-directory: e2e-tests
+        env:
+          VW_TAG: ${{ matrix.vw }}
+        run: bunx playwright test --project=sso-e2e --project=proxy-patching
+
+      - name: Docker container logs (on failure)
+        if: failure()
+        working-directory: e2e-tests
+        run: |
+          echo "===== vaultwarden (vaultwarden::sso is at debug level) ====="
+          docker logs e2e_vaultwarden-e2e 2>&1 | tail -300 || true
+          echo "===== masterless ====="
+          docker logs e2e_masterless-e2e 2>&1 | tail -120 || true
+          echo "===== keycloak ====="
+          docker logs e2e_keycloak-e2e 2>&1 | tail -120 || true
+
+  # Docker Build & Publish
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      # Prepare platform pair for cache key (linux/amd64 -> linux-amd64)
+      - name: Prepare platform pair
+        id: platform
+        run: |
+          platform=${{ matrix.platform }}
+          echo "pair=${platform//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=build-${{ steps.platform.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=build-${{ steps.platform.outputs.pair }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.platform.outputs.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Docker Manifest Merge
+  docker-publish:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    # The release gates on the unit tests and on `smoke` (the browserless end-to-end check
+    # of the passwordless flow); the Playwright suites run in parallel as signals only.
+    needs: [docker-build, smoke]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+  # Helm Chart Lint
+  helm-lint:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: docker-publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint ${{ env.CHART_PATH }}
+
+  # Helm Chart Publish
+  helm-publish:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [docker-publish, helm-lint]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} --username ${{ github.actor }} --password-stdin
+
+      - name: Package chart
+        run: helm package ${{ env.CHART_PATH }} --destination /tmp/charts
+
+      - name: Push chart to GHCR
+        run: |
+          for pkg in /tmp/charts/*.tgz; do
+            helm push "$pkg" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+          done

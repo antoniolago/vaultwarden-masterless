@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vw-masterless-config
+  namespace: vaultwarden
+  labels:
+    app.kubernetes.io/name: vw-masterless
+    app.kubernetes.io/component: masterless
+data:
+  HOST: "0.0.0.0"
+  PORT: "8484"
+  LOG_LEVEL: "info"
+  DATABASE_PATH: "/data/masterless.sqlite"
+  RSA_PRIVATE_KEY_FILE: "/secrets/rsa/rsa_private.pem"
+  RSA_PUBLIC_KEY_FILE: "/secrets/rsa/rsa_public.pem"
+  VAULTWARDEN_RSA_PUBLIC_KEY_FILE: "/secrets/vw-rsa/rsa_key.pub.pem"
+  PROXY_ENABLED: "true"
+
+  # --- Set these to match your environment ---
+  # URL of the Vaultwarden backend (cluster-internal Service)
+  VAULTWARDEN_URL: "http://vaultwarden:80"
+  # Externally-reachable URL of the /user-keys endpoint
+  USER_KEYS_URL: "https://vault.example.com/user-keys"

@@ -1,0 +1,18 @@
+apiVersion: v2
+name: vaultwarden-masterless
+description: Masterpassword-less SSO proxy for Vaultwarden — stores user encryption keys and patches API responses
+type: application
+version: 0.4.2
+appVersion: "0.2.0"
+home: https://github.com/antoniolago/vaultwarden-masterless
+sources:
+  - https://github.com/antoniolago/vaultwarden-masterless
+maintainers:
+  - name: antoniolago
+    url: https://github.com/antoniolago
+keywords:
+  - vaultwarden
+  - bitwarden
+  - sso
+  - passwordless
+  - key-management

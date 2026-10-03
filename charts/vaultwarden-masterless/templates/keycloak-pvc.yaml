@@ -1,0 +1,18 @@
+{{- if and .Values.keycloak.enabled .Values.keycloak.persistence.enabled (not .Values.keycloak.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keycloak-data
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+spec:
+  accessModes:
+    - {{ .Values.keycloak.persistence.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.keycloak.persistence.size | default "1Gi" }}
+  {{- if .Values.keycloak.persistence.storageClass }}
+  storageClassName: {{ .Values.keycloak.persistence.storageClass | quote }}
+  {{- end }}
+{{- end }}

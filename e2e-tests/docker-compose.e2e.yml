@@ -1,0 +1,138 @@
+##############################################################################
+# Vaultwarden Masterless — E2E Test Environment
+#
+# All services use network_mode: "host" (like VW's own Playwright tests).
+# This eliminates Docker DNS issues — everything is on localhost.
+#
+# Services:
+#   - Keycloak:       OIDC provider (port 18080)
+#   - KeycloakSetup:  Automated realm/client/user creation
+#   - Vaultwarden:    Stock VW with SSO enabled (port 18000)
+#   - Masterless:     Proxy in front of VW (port 18443)
+#
+# Usage:
+#   Managed by Playwright — see run-e2e-tests.sh
+##############################################################################
+
+services:
+  # ---------- Masterless (built from project root) ----------
+  MasterlessPrebuild:
+    profiles: ["e2e"]
+    container_name: e2e_masterless_prebuilt
+    image: e2e_masterless_prebuilt
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: /bin/bash
+    restart: "no"
+
+  # Holds the RSA/TLS material masterless needs, in a named volume.
+  #
+  # A host bind mount (./data/keys:/keys) does not work everywhere: with a
+  # docker-in-docker CI runner the daemon resolves the source path in *its* own
+  # filesystem, so the directory arrives empty and masterless dies with
+  # "Cannot read RSA private key". A named volume lives in the daemon's storage
+  # and behaves identically on any runner. global-setup.ts fills it with
+  # `docker cp` (client-side, so it works over a remote daemon too).
+  #
+  # It also mounts Vaultwarden's data folder: global-setup seeds the RSA key
+  # pair there before Vaultwarden starts, and wipes the database between tests.
+  KeysVolume:
+    profiles: ["e2e"]
+    container_name: e2e_keys-${ENV:-e2e}
+    image: e2e_masterless_prebuilt
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - e2e_keys:/keys
+      - e2e_vwdata:/data
+    restart: "no"
+    # No depends_on: MasterlessPrebuild is a build-only service, and depending
+    # on it makes compose create a container for it (which then collides on
+    # re-runs). global-setup builds the image explicitly instead.
+
+  Masterless:
+    profiles: ["e2e"]
+    container_name: e2e_masterless-${ENV:-e2e}
+    image: e2e_masterless_prebuilt
+    network_mode: "host"
+    env_file: ${DC_ENV_FILE:-test.env}
+    environment:
+      - HOST=0.0.0.0
+      - PORT=${MASTERLESS_PORT:-8443}
+      - LOG_LEVEL=debug
+      - VAULTWARDEN_URL=http://${TEST_HOST:-127.0.0.1}:${ROCKET_PORT:-8000}
+      - VAULTWARDEN_RSA_PUBLIC_KEY_FILE=/keys/vw_rsa_key.pub.pem
+      - RSA_PRIVATE_KEY_FILE=/keys/rsa_private.pem
+      - RSA_PUBLIC_KEY_FILE=/keys/rsa_public.pem
+      - DATABASE_PATH=/data/masterless.sqlite
+      - PROXY_ENABLED=true
+      - USER_KEYS_URL=https://${TEST_HOST:-127.0.0.1}:${MASTERLESS_PORT:-8443}
+      - DOMAIN=${DOMAIN}
+      - TLS_CERT_FILE=/keys/tls.crt
+      - TLS_KEY_FILE=/keys/tls.key
+    volumes:
+      - e2e_keys:/keys:ro
+    restart: "no"
+    depends_on:
+      - KeysVolume
+
+  # ---------- Vaultwarden ----------
+  Vaultwarden:
+    profiles: ["e2e", "vaultwarden"]
+    container_name: e2e_vaultwarden-${ENV:-e2e}
+    image: vaultwarden/server:${VW_TAG:-1.37.3}
+    network_mode: "host"
+    env_file: ${DC_ENV_FILE:-test.env}
+    environment:
+      - DOMAIN
+      - ADMIN_TOKEN
+      - ROCKET_ADDRESS
+      - ROCKET_PORT
+      - LOG_LEVEL
+      - I_REALLY_WANT_VOLATILE_STORAGE
+      - SSO_ENABLED
+      - SSO_ONLY
+      - SSO_CLIENT_ID
+      - SSO_CLIENT_SECRET
+      - SSO_AUTHORITY
+    volumes:
+      # Vaultwarden loads an existing /data/rsa_key.pem; seeding it keeps its
+      # signing key identical to the public key masterless is given.
+      - e2e_vwdata:/data
+    restart: "no"
+
+  # ---------- Keycloak (OIDC Provider) ----------
+  Keycloak:
+    profiles: ["keycloak", "vaultwarden"]
+    container_name: e2e_keycloak-${ENV:-e2e}
+    image: quay.io/keycloak/keycloak:26.3.4
+    network_mode: "host"
+    command:
+      - start-dev
+    env_file: ${DC_ENV_FILE:-test.env}
+    environment:
+      - KC_HTTP_HOST=0.0.0.0
+    restart: "no"
+
+  KeycloakSetup:
+    profiles: ["keycloak", "vaultwarden"]
+    container_name: e2e_keycloakSetup-${ENV:-e2e}
+    image: e2e_keycloak_setup
+    build:
+      context: ./compose/keycloak
+      dockerfile: Dockerfile.setup
+    network_mode: "host"
+    depends_on:
+      - Keycloak
+    restart: "no"
+    env_file: ${DC_ENV_FILE:-test.env}
+    environment:
+      - DOMAIN
+
+volumes:
+  # Fixed name so tests and helpers can address it regardless of the compose project name
+  e2e_keys:
+    name: e2e_keys
+  # Vaultwarden's data folder: RSA key pair + database
+  e2e_vwdata:
+    name: e2e_vwdata

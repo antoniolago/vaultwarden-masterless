@@ -1,0 +1,24 @@
+# Build context hygiene.
+#
+# The Dockerfile reads exactly three things: Cargo.toml, Cargo.lock and src/.
+# Without this file the whole checkout is streamed to the build daemon on every
+# build — locally that means the 2.6 GB cargo `target/` directory and the git
+# history, and on a runner it means every build of the e2e/compat images pays for
+# material it never looks at. The generated e2e key material
+# (e2e-tests/data/**, private RSA + TLS keys) must never enter a build context
+# either.
+
+.git
+.gitignore
+target
+e2e-tests
+charts
+deploy
+docs
+k8s
+scripts
+tests
+*/*.md
+*.md
+LICENSE
+.dockerignore

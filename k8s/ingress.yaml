@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vw-masterless
+  namespace: vaultwarden
+  labels:
+    app.kubernetes.io/name: vw-masterless
+    app.kubernetes.io/component: masterless
+  # annotations:
+    # Adjust for your ingress controller (nginx, traefik, etc.)
+    # nginx.ingress.kubernetes.io/proxy-body-size: "128m"
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  # Uncomment if using TLS
+  # tls:
+  #   - hosts:
+  #       - vault.example.com
+  #     secretName: vaultwarden-tls
+  rules:
+    - host: vault.example.com    # <-- replace with your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vw-masterless
+                port:
+                  name: http

@@ -1,0 +1,7 @@
+node_modules/
+bun.lockb
+playwright-report/
+test-results/
+data/
+blob-report/
+*.log

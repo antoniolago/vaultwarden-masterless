@@ -1,0 +1,63 @@
+{{- if .Values.keycloak.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keycloak-setup
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak-setup
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: keycloak-setup
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: setup
+          image: "{{ .Values.keycloak.image.repository }}:{{ .Values.keycloak.image.tag }}"
+          command: ["/bin/bash", "/scripts/setup.sh"]
+          env:
+            - name: KC_ADMIN_PASSWORD
+              {{- if .Values.keycloak.adminPassword.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keycloak.adminPassword.existingSecret }}
+                  key: {{ .Values.keycloak.adminPassword.key | default "KEYCLOAK_ADMIN_PASSWORD" }}
+              {{- else }}
+              value: {{ .Values.keycloak.adminPassword.value | quote }}
+              {{- end }}
+            - name: CLIENT_SECRET
+              {{- if .Values.keycloak.setup.clientSecret.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keycloak.setup.clientSecret.existingSecret }}
+                  key: {{ .Values.keycloak.setup.clientSecret.key | default "CLIENT_SECRET" }}
+              {{- else }}
+              value: {{ .Values.keycloak.setup.clientSecret.value | quote }}
+              {{- end }}
+            - name: DEMO_USER_PASSWORD
+              {{- if .Values.keycloak.setup.demoUser.password.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keycloak.setup.demoUser.password.existingSecret }}
+                  key: {{ .Values.keycloak.setup.demoUser.password.key | default "DEMO_USER_PASSWORD" }}
+              {{- else }}
+              value: {{ .Values.keycloak.setup.demoUser.password.value | quote }}
+              {{- end }}
+          volumeMounts:
+            - name: setup-script
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: setup-script
+          configMap:
+            name: {{ include "vaultwarden-masterless.fullname" . }}-keycloak-setup
+            defaultMode: 0755
+{{- end }}

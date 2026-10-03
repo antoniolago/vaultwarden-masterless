@@ -1,0 +1,57 @@
+vaultwarden-masterless has been deployed!
+
+{{- if .Values.ingress.enabled }}
+Access your vault at:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+Get the service URL:
+  kubectl port-forward svc/{{ include "vaultwarden-masterless.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  Then open: http://localhost:{{ .Values.service.port }}/alive
+{{- end }}
+
+{{- if .Values.vaultwarden.enabled }}
+
+Bundled Vaultwarden is ENABLED.
+  RSA keys (masterless + VW) were auto-generated and stored in secret
+  "{{ include "vaultwarden-masterless.rsaSecretName" . }}".
+  Vaultwarden URL is auto-configured: http://{{ include "vaultwarden-masterless.fullname" . }}-vaultwarden:80
+{{- else }}
+{{- if and (not .Values.vaultwardenRsaPublicKey.publicKey) (not .Values.vaultwardenRsaPublicKey.existingSecret) }}
+
+WARNING: No Vaultwarden RSA public key configured!
+  You must provide vaultwardenRsaPublicKey.publicKey or vaultwardenRsaPublicKey.existingSecret
+  for JWT verification to work. Extract it from Vaultwarden:
+    openssl pkey -in <vw-data>/rsa_key.pem -pubout
+{{- end }}
+{{- end }}
+
+{{- if .Values.vaultwarden.ssoOnly }}
+
+IMPORTANT — mobile clients need one setting after their first login:
+  A passwordless (Key Connector) account has no master password, and the Bitwarden apps
+  deliberately log themselves out when an account has neither a master password nor a
+  PIN/biometrics ("There is no valid way to unlock this app"). After the first SSO login, users
+  must open Settings -> Account security -> Unlock options and enable "Unlock with PIN code" or
+  "Unlock with biometrics"; otherwise every app restart costs them a fresh SSO login.
+  Details in COMPATIBILITY.md.
+{{- end }}
+
+{{- if .Values.keycloak.enabled }}
+
+Bundled Keycloak is ENABLED.
+  Admin console: http://{{ include "vaultwarden-masterless.fullname" . }}-keycloak:8080
+  Admin user:    {{ .Values.keycloak.adminUser }}
+  OIDC realm:    {{ .Values.keycloak.setup.realm }}
+  Demo user:     {{ .Values.keycloak.setup.demoUser.username }} / {{ .Values.keycloak.setup.demoUser.password }}
+{{- end }}
+
+{{- if not .Values.rsaKeys.existingSecret }}
+{{- if not .Values.rsaKeys.privateKey }}
+
+NOTE: RSA keys were auto-generated for at-rest encryption.
+  The secret "{{ include "vaultwarden-masterless.rsaSecretName" . }}" has resource-policy: keep
+  so it will survive helm uninstall. Back up the private key!
+{{- end }}
+{{- end }}

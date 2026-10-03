@@ -1,0 +1,93 @@
+{{- if .Values.keycloak.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keycloak
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak
+spec:
+  replicas: 1
+  # Keycloak keeps its data in an H2 file on a ReadWriteOnce PVC, which is single-writer:
+  # a rolling update starts the new pod while the old one still holds the lock and it dies
+  # with `The file is locked: /opt/keycloak/data/h2/keycloakdb.mv.db`, leaving the Helm
+  # upgrade to time out. The other two deployments already use Recreate for the same
+  # reason; this one was missing it (only visible when the pod spec actually changes).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "vaultwarden-masterless.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: keycloak
+  template:
+    metadata:
+      labels:
+        {{- include "vaultwarden-masterless.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: keycloak
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: keycloak
+          image: "{{ .Values.keycloak.image.repository }}:{{ .Values.keycloak.image.tag }}"
+          imagePullPolicy: {{ .Values.keycloak.image.pullPolicy }}
+          args: ["start-dev"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: KC_HTTP_HOST
+              value: "0.0.0.0"
+            - name: KC_HTTP_PORT
+              value: "8080"
+            - name: KEYCLOAK_ADMIN
+              value: {{ .Values.keycloak.adminUser | quote }}
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              {{- if .Values.keycloak.adminPassword.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keycloak.adminPassword.existingSecret }}
+                  key: {{ .Values.keycloak.adminPassword.key | default "KEYCLOAK_ADMIN_PASSWORD" }}
+              {{- else }}
+              value: {{ .Values.keycloak.adminPassword.value | quote }}
+              {{- end }}
+            - name: KC_PROXY_HEADERS
+              value: "xforwarded"
+            {{- if .Values.keycloak.hostname }}
+            - name: KC_HOSTNAME
+              value: {{ .Values.keycloak.hostname | quote }}
+            {{- end }}
+            - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+              value: {{ .Values.keycloak.hostnameBackchannelDynamic | quote }}
+          {{- with .Values.keycloak.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /realms/master
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /realms/master
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: kc-data
+              mountPath: /opt/keycloak/data
+      volumes:
+        - name: kc-data
+          {{- if .Values.keycloak.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.keycloak.persistence.existingClaim | default (printf "%s-keycloak-data" (include "vaultwarden-masterless.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

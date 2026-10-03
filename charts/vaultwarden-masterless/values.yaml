@@ -1,0 +1,277 @@
+# Default values for vaultwarden-masterless
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/antoniolago/vaultwarden-masterless
+  pullPolicy: IfNotPresent
+  # `main` follows the latest build of the default branch; `sha-<short>` pins a commit.
+  tag: "main"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# --- Core configuration ---
+config:
+  # Internal URL of your Vaultwarden instance (cluster Service)
+  vaultwardenUrl: "http://vaultwarden:80"
+  # Public URL of /user-keys endpoint (must be reachable from browsers/apps)
+  userKeysUrl: "https://vault.example.com/user-keys"
+  # Enable reverse proxy mode
+  proxyEnabled: "true"
+  # Bind settings
+  host: "0.0.0.0"
+  port: "8484"
+  # Log level: trace, debug, info, warn, error
+  logLevel: "info"
+  # SQLite database path inside the container
+  databasePath: "/data/masterless.sqlite"
+  # Hours between automatic wrapping-secret rotations (0 = disabled)
+  rotationIntervalHours: "0"
+  # Tested Vaultwarden version for compatibility matrix
+  compatVwVersion: "1.37.3"
+  # Tested Keycloak version for compatibility matrix
+  compatKcVersion: "26.3.4"
+  # Date of last compatibility test (ISO 8601 date)
+  compatLastTested: "2026-09-18"
+  # JSON object of tested client versions
+  compatClients: '{"web":"2024.x - 2026.x","desktop":"2024.x - 2026.x","browser_extension":"2024.x - 2026.x","mobile":"untested"}'
+  # URL of the compatibility matrix returned by GET /version (status_url)
+  compatStatusUrl: "https://github.com/antoniolago/vaultwarden-masterless/blob/main/COMPATIBILITY.md"
+  # External domain for JWT issuer validation (auto-set from vaultwarden.domain
+  # when bundled VW is enabled). Required when VAULTWARDEN_URL is an internal
+  # cluster address and VW's DOMAIN differs.
+  domain: ""
+  # Display name for the synthetic organization injected for Key Connector flow
+  syntheticOrgName: ""
+  # Identifier for the synthetic organization (used in API calls)
+  syntheticOrgIdentifier: ""
+
+# --- RSA keys for at-rest encryption ---
+# If rsaKeys.privateKey and rsaKeys.publicKey are empty, a 4096-bit RSA
+# key pair is auto-generated on first install and stored in a Secret.
+# The auto-generated secret uses helm lookup to persist across upgrades.
+rsaKeys:
+  # Provide PEM-encoded keys to use your own, or leave empty for auto-generation
+  privateKey: ""
+  publicKey: ""
+  # Name of an existing Secret containing rsa_private.pem and rsa_public.pem
+  # If set, rsaKeys.privateKey/publicKey are ignored
+  existingSecret: ""
+
+# --- Vaultwarden RSA public key (for JWT verification) ---
+# This is Vaultwarden's own RSA public key, used to verify JWTs.
+# Extract it: openssl pkey -in <vw-data>/rsa_key.pem -pubout
+vaultwardenRsaPublicKey:
+  # PEM-encoded public key, or leave empty if using existingSecret
+  publicKey: ""
+  # Name of an existing Secret containing rsa_key.pub.pem
+  existingSecret: ""
+
+service:
+  type: ClusterIP
+  port: 8484
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-body-size: "128m"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: vault.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: vaultwarden-tls
+  #    hosts:
+  #      - vault.example.com
+
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  # Use an existing PVC instead of creating one
+  existingClaim: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+securityContext:
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+
+podSecurityContext:
+  fsGroup: 1000
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+
+livenessProbe:
+  httpGet:
+    path: /alive
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /alive
+    port: http
+  initialDelaySeconds: 3
+  periodSeconds: 10
+
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+
+# =============================================================================
+# Bundled Vaultwarden (optional)
+# =============================================================================
+# Deploy a stock Vaultwarden alongside masterless. When enabled, the chart
+# auto-generates VW's RSA key pair, wires SSO config, and sets the internal
+# vaultwardenUrl automatically — zero manual key-copying needed.
+vaultwarden:
+  enabled: false
+  image:
+    repository: vaultwarden/server
+    tag: "1.37.3"
+    pullPolicy: IfNotPresent
+  # Public URL clients use to reach the vault (through the masterless proxy)
+  domain: "https://vault.example.com"
+  signupsAllowed: "true"
+  ssoOnly: "false"
+  logLevel: "info"
+  adminToken:
+    # Plain value (use existingSecret in production)
+    value: ""
+    existingSecret: ""
+    key: "ADMIN_TOKEN"
+  sso:
+    clientId: "vaultwarden"
+    clientSecret:
+      # Plain value (use existingSecret in production)
+      value: ""
+      existingSecret: ""
+      key: "SSO_CLIENT_SECRET"
+    # OIDC issuer URL — e.g. https://keycloak.example.com/realms/myrealm
+    authority: ""
+    pkce: "true"
+  # Extra env vars as key: value pairs
+  extraEnv: {}
+  # External (PostgreSQL) database URL — overrides SQLite default
+  # When set, Vaultwarden uses this database instead of the bundled SQLite.
+  databaseUrl:
+    existingSecret: ""
+    key: "DATABASE_URL"
+  # Auto-create a default organization on first deploy.
+  # Required when using external OIDC (keycloak.enabled=false).
+  # Uses the admin token to call Vaultwarden's API.
+  orgSetup:
+    enabled: true
+    name: "My Organization"
+    billingEmail: "admin@example.com"
+    identifier: ""
+  persistence:
+    enabled: true
+    accessMode: ReadWriteOnce
+    size: 1Gi
+    storageClass: ""
+    existingClaim: ""
+  resources:
+    requests:
+      cpu: 10m
+      memory: 50Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# =============================================================================
+# Bundled Keycloak (optional)
+# =============================================================================
+# Deploy Keycloak as the OIDC provider. When enabled alongside vaultwarden,
+# a setup Job auto-creates the realm, OIDC client, and a demo user so the
+# whole stack works out of the box.
+keycloak:
+  enabled: false
+  image:
+    repository: quay.io/keycloak/keycloak
+    tag: "26.3.4"
+    pullPolicy: IfNotPresent
+  adminUser: "admin"
+  adminPassword:
+    value: "admin"
+    existingSecret: ""
+    key: "KEYCLOAK_ADMIN_PASSWORD"
+  # Public URL for Keycloak (set when behind a reverse proxy / ingress)
+  hostname: ""
+  # Whether Keycloak derives backchannel URLs (token, userinfo) from the incoming
+  # request instead of from KC_HOSTNAME.
+  #
+  # Keep true when clients reach Keycloak over the same scheme as Keycloak sees
+  # them. Set false when something in front speaks plain HTTP to Keycloak (a
+  # tunnel terminating TLS, for instance): with true, Keycloak then advertises
+  # `http://` token endpoints, and the authorization-code exchange — client
+  # secret included — travels in cleartext to the proxy.
+  hostnameBackchannelDynamic: true
+  persistence:
+    enabled: true
+    accessMode: ReadWriteOnce
+    size: 1Gi
+    storageClass: ""
+    existingClaim: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Auto-setup: create realm, OIDC client, and demo user
+  setup:
+    realm: "demo"
+    sentinelRealm: "demo-sentinel"
+    clientId: "vaultwarden"
+    clientSecret:
+      # Plain value (use existingSecret in production)
+      value: "demo-vaultwarden-secret"
+      existingSecret: ""
+      key: "CLIENT_SECRET"
+    accessTokenLifespan: 600
+    # Keycloak's own session lifetime decides how long an SSO client stays logged in:
+    # for SSO logins Vaultwarden hands the IdP's refresh token straight to the client
+    # (src/sso.rs -> create_auth_tokens_impl) instead of minting its own 30/90-day one, so the
+    # client's refresh token expires when Keycloak's session does. Keycloak's defaults
+    # (SSO Session Idle 30 minutes, SSO Session Max 10 hours) therefore log every mobile client
+    # out half an hour after it is closed — the "I have to log in again every time I open the
+    # app" report. 30 days matches what Bitwarden clients expect from a password login
+    # (Vaultwarden's DEFAULT_REFRESH_VALIDITY).
+    ssoSessionIdleTimeout: 2592000    # 30 days, in seconds
+    ssoSessionMaxLifespan: 2592000    # 30 days; must be >= ssoSessionIdleTimeout
+    # Domain injected into redirect URIs — should match vaultwarden.domain
+    redirectDomain: "https://vault.example.com"
+    demoUser:
+      username: "demo"
+      password:
+        # Plain value (use existingSecret in production)
+        value: "demo"
+        existingSecret: ""
+        key: "DEMO_USER_PASSWORD"
+      email: "demo@demo.masterless.example"
+      firstName: "Demo"
+      lastName: "User"

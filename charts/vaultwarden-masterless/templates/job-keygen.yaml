@@ -1,0 +1,111 @@
+{{- if and (not .Values.rsaKeys.existingSecret) (not .Values.rsaKeys.privateKey) }}
+{{- $secretName := include "vaultwarden-masterless.rsaSecretName" . }}
+{{- $existingSecret := (lookup "v1" "Secret" .Release.Namespace $secretName) }}
+{{- if not $existingSecret }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keygen
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed
+spec:
+  template:
+    metadata:
+      labels:
+        {{- include "vaultwarden-masterless.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "vaultwarden-masterless.fullname" . }}-keygen
+      containers:
+        - name: keygen
+          image: docker.io/alpine:3.20
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              apk add --no-cache openssl curl >/dev/null
+              curl -sLo /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+              chmod +x /usr/local/bin/kubectl
+
+              TMPDIR=$(mktemp -d)
+              trap "rm -rf $TMPDIR" EXIT
+
+              echo "Generating 4096-bit RSA key pair for masterless..."
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$TMPDIR/rsa_private.pem" 2>/dev/null
+              openssl pkey -in "$TMPDIR/rsa_private.pem" -pubout -out "$TMPDIR/rsa_public.pem" 2>/dev/null
+
+              FROM_FILE_ARGS="--from-file=rsa_private.pem=$TMPDIR/rsa_private.pem --from-file=rsa_public.pem=$TMPDIR/rsa_public.pem"
+
+              {{- if .Values.vaultwarden.enabled }}
+              echo "Generating 2048-bit RSA key pair for Vaultwarden..."
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$TMPDIR/vw_rsa_key.pem" 2>/dev/null
+              openssl pkey -in "$TMPDIR/vw_rsa_key.pem" -pubout -out "$TMPDIR/vw_rsa_key.pub.pem" 2>/dev/null
+              FROM_FILE_ARGS="$FROM_FILE_ARGS --from-file=vw_rsa_key.pem=$TMPDIR/vw_rsa_key.pem --from-file=vw_rsa_key.pub.pem=$TMPDIR/vw_rsa_key.pub.pem"
+              {{- end }}
+
+              echo "Creating secret {{ $secretName }}..."
+              kubectl create secret generic {{ $secretName }} \
+                --namespace={{ .Release.Namespace }} \
+                $FROM_FILE_ARGS
+              kubectl label secret {{ $secretName }} \
+                --namespace={{ .Release.Namespace }} \
+                app.kubernetes.io/managed-by=Helm
+              kubectl annotate secret {{ $secretName }} \
+                --namespace={{ .Release.Namespace }} \
+                "helm.sh/resource-policy=keep" \
+                "meta.helm.sh/release-name={{ .Release.Name }}" \
+                "meta.helm.sh/release-namespace={{ .Release.Namespace }}"
+              echo "RSA keys created successfully"
+  backoffLimit: 3
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keygen
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keygen
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keygen
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": hook-succeeded,hook-failed
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keygen
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vaultwarden-masterless.fullname" . }}-keygen
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

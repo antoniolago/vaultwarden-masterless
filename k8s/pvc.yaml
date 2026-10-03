@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vw-masterless-data
+  namespace: vaultwarden
+  labels:
+    app.kubernetes.io/name: vw-masterless
+    app.kubernetes.io/component: masterless
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # Uncomment and set if you need a specific StorageClass
+  # storageClassName: standard

@@ -1,0 +1,3 @@
+FROM quay.io/keycloak/keycloak:26.3.4
+COPY --chmod=755 setup.sh /tmp/setup.sh
+ENTRYPOINT ["/bin/bash", "/tmp/setup.sh"]

@@ -1,0 +1,18 @@
+{{- if and .Values.vaultwarden.enabled .Values.vaultwarden.persistence.enabled (not .Values.vaultwarden.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-vaultwarden-data
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: vaultwarden
+spec:
+  accessModes:
+    - {{ .Values.vaultwarden.persistence.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.vaultwarden.persistence.size | default "1Gi" }}
+  {{- if .Values.vaultwarden.persistence.storageClass }}
+  storageClassName: {{ .Values.vaultwarden.persistence.storageClass | quote }}
+  {{- end }}
+{{- end }}

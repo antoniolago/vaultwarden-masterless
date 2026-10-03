@@ -1,0 +1,106 @@
+##############################################################################
+# Vaultwarden Masterless — Full Test Environment
+#
+# Services:
+#   - vaultwarden:  Stock Vaultwarden (unmodified), internal only
+#   - masterless:   This project in proxy mode — the client-facing entry point
+#   - pocket-id:    OIDC identity provider (Pocket-ID)
+#
+# Usage:
+#   cd deploy
+#   ./setup.sh          # Generate keys + bootstrap config
+#   podman-compose up   # or docker compose up
+#
+# Access:
+#   Vaultwarden (via masterless proxy): http://localhost:8443
+#   Pocket-ID admin:                    http://localhost:3100
+##############################################################################
+
+services:
+  # ---------- Vaultwarden (internal, not exposed to clients directly) ----------
+  vaultwarden:
+    image: vaultwarden/server:1.37.3
+    container_name: vw-server
+    restart: unless-stopped
+    environment:
+      DOMAIN: "http://localhost:8443"
+      SIGNUPS_ALLOWED: "true"
+      ADMIN_TOKEN: "${VW_ADMIN_TOKEN:-admin123}"
+      LOG_LEVEL: "info"
+
+      # SSO / OIDC — pointing to Pocket-ID
+      SSO_ENABLED: "true"
+      SSO_ONLY: "false"
+      SSO_CLIENT_ID: "${OIDC_CLIENT_ID:-vaultwarden}"
+      SSO_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-vaultwarden-secret}"
+      SSO_AUTHORITY: "http://pocket-id:1411/oidc"
+      SSO_PKCE: "true"
+      SSO_AUTH_ONLY_NOT_SESSION: "false"
+
+      ROCKET_ADDRESS: "0.0.0.0"
+      ROCKET_PORT: "80"
+    volumes:
+      - vw-data:/data
+    networks:
+      - masterless-net
+    # Not exposed to host — clients go through masterless proxy
+
+  # ---------- Masterless (proxy mode — client-facing) ----------
+  masterless:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: masterless-server
+    restart: unless-stopped
+    depends_on:
+      - vaultwarden
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8484"
+      LOG_LEVEL: "debug"
+
+      # Vaultwarden backend (internal Docker network)
+      VAULTWARDEN_URL: "http://vaultwarden:80"
+      VAULTWARDEN_RSA_PUBLIC_KEY_FILE: "/keys/vw_rsa_key.pub.pem"
+
+      # RSA keys for at-rest encryption
+      RSA_PRIVATE_KEY_FILE: "/keys/rsa_private.pem"
+      RSA_PUBLIC_KEY_FILE: "/keys/rsa_public.pem"
+      DATABASE_PATH: "/data/masterless.sqlite"
+
+      # Proxy mode
+      PROXY_ENABLED: "true"
+      USER_KEYS_URL: "http://localhost:8443/user-keys"
+    ports:
+      - "8443:8484"   # <-- Clients connect here
+    volumes:
+      - masterless-data:/data
+      - ./keys:/keys:ro               # RSA keys (app + VW public key)
+    networks:
+      - masterless-net
+
+  # ---------- Pocket-ID (OIDC Provider) ----------
+  pocket-id:
+    image: ghcr.io/pocket-id/pocket-id:latest
+    container_name: pocket-id
+    restart: unless-stopped
+    environment:
+      PUBLIC_APP_URL: "http://localhost:3100"
+      TRUST_PROXY: "true"
+      DB_PROVIDER: "sqlite"
+      ENCRYPTION_KEY: ${POCKET_ID_ENCRYPTION_KEY}
+    ports:
+      - "3100:1411"
+    volumes:
+      - pocket-id-data:/app/backend/data
+    networks:
+      - masterless-net
+
+volumes:
+  vw-data:
+  masterless-data:
+  pocket-id-data:
+
+networks:
+  masterless-net:
+    driver: bridge

@@ -1,0 +1,117 @@
+{{- if .Values.keycloak.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vaultwarden-masterless.fullname" . }}-keycloak-setup
+  labels:
+    {{- include "vaultwarden-masterless.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keycloak-setup
+data:
+  setup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    export PATH=/opt/keycloak/bin:$PATH
+
+    KC_URL="http://{{ include "vaultwarden-masterless.fullname" . }}-keycloak:8080"
+    REALM="{{ .Values.keycloak.setup.realm }}"
+    SENTINEL_REALM="{{ .Values.keycloak.setup.sentinelRealm }}"
+    CLIENT_ID="{{ .Values.keycloak.setup.clientId }}"
+    # CLIENT_SECRET injected via env var
+    DEMO_USER="{{ .Values.keycloak.setup.demoUser.username }}"
+    # DEMO_USER_PASSWORD injected via env var
+    DEMO_USER_EMAIL="{{ .Values.keycloak.setup.demoUser.email }}"
+    DOMAIN="{{ .Values.keycloak.setup.redirectDomain }}"
+    # Session lifetime in seconds. For SSO logins the client's refresh token IS the IdP's, so
+    # these two values decide how long a mobile app stays logged in after it is closed.
+    SSO_IDLE="{{ int64 .Values.keycloak.setup.ssoSessionIdleTimeout }}"
+    SSO_MAX="{{ int64 .Values.keycloak.setup.ssoSessionMaxLifespan }}"
+
+    echo "=== Keycloak Setup ==="
+
+    # Wait for TCP
+    while ! (echo > /dev/tcp/{{ include "vaultwarden-masterless.fullname" . }}-keycloak/8080) 2>/dev/null; do
+        echo "Waiting for Keycloak TCP... (retry in 3s)"
+        sleep 3
+    done
+
+    # Wait for HTTP readiness
+    READY=0
+    while [[ "$READY" != "1" ]] ; do
+        echo "Waiting for Keycloak HTTP... (retry in 3s)"
+        sleep 3
+        if kcadm.sh config credentials \
+            --server "$KC_URL" \
+            --realm master \
+            --user "{{ .Values.keycloak.adminUser }}" \
+            --password "$KC_ADMIN_PASSWORD" \
+            --client admin-cli 2>/dev/null; then
+            READY=1
+        fi
+    done
+
+    # Idempotency check — but never skip the session timeouts. Realms created by an older chart
+    # carry Keycloak's short defaults, and re-running this hook after an upgrade is exactly how
+    # they get fixed.
+    if kcadm.sh get "realms/$SENTINEL_REALM" --fields realm 2>/dev/null | grep -q "$SENTINEL_REALM"; then
+        echo "Setup already done (sentinel realm exists). Ensuring session timeouts."
+        kcadm.sh update "realms/$REALM" \
+            -s "ssoSessionIdleTimeout=$SSO_IDLE" \
+            -s "ssoSessionMaxLifespan=$SSO_MAX"
+        echo "  session timeouts: idle=${SSO_IDLE}s max=${SSO_MAX}s"
+        exit 0
+    fi
+
+    kcadm.sh config credentials \
+        --server "$KC_URL" \
+        --realm master \
+        --user "{{ .Values.keycloak.adminUser }}" \
+        --password "$KC_ADMIN_PASSWORD" \
+        --client admin-cli
+
+    echo "Creating realm: $REALM"
+    kcadm.sh create realms \
+        -s realm="$REALM" \
+        -s enabled=true \
+        -s "accessTokenLifespan={{ int64 .Values.keycloak.setup.accessTokenLifespan }}" \
+        -s "ssoSessionIdleTimeout=$SSO_IDLE" \
+        -s "ssoSessionMaxLifespan=$SSO_MAX"
+
+    # Direct access grants (ROPC) stay OFF: the only way into this realm is the
+    # browser SSO flow. Keycloak 26 already defaults to false for clients created
+    # through the admin API, but this is a security boundary — pin it instead of
+    # relying on a default that has changed between Keycloak versions.
+    echo "Creating OIDC client: $CLIENT_ID"
+    kcadm.sh create clients -r "$REALM" \
+        -s "clientId=$CLIENT_ID" \
+        -s "secret=$CLIENT_SECRET" \
+        -s "redirectUris=[\"$DOMAIN/*\"]" \
+        -s "webOrigins=[\"$DOMAIN\"]" \
+        -s standardFlowEnabled=true \
+        -s directAccessGrantsEnabled=false \
+        -s serviceAccountsEnabled=false \
+        -i
+
+    echo "Creating user: $DEMO_USER"
+    USER_ID=$(kcadm.sh create users -r "$REALM" \
+        -s "username=$DEMO_USER" \
+        -s "firstName={{ .Values.keycloak.setup.demoUser.firstName }}" \
+        -s "lastName={{ .Values.keycloak.setup.demoUser.lastName }}" \
+        -s "email=$DEMO_USER_EMAIL" \
+        -s emailVerified=true \
+        -s enabled=true \
+        -i)
+    kcadm.sh update "users/$USER_ID/reset-password" -r "$REALM" \
+        -s type=password \
+        -s "value=$DEMO_USER_PASSWORD" \
+        -n
+
+    echo "Creating sentinel realm: $SENTINEL_REALM"
+    kcadm.sh create realms -s realm="$SENTINEL_REALM" -s enabled=true
+
+    echo "=== Keycloak Setup Complete ==="
+    echo "  Realm:     $REALM"
+    echo "  Client:    $CLIENT_ID"
+    echo "  Demo user: $DEMO_USER"
+    echo "  Redirect:  $DOMAIN/*"
+{{- end }}
