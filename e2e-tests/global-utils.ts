@@ -518,18 +518,31 @@ async function loginOnce(
     // Key Connector organisation/domain confirmation.
     //
     // A fresh account (every CI run, and any local run after a wipe) lands on
-    // `/#/confirm-key-connector-domain` right after the SSO callback. Two traps,
-    // both observed for real:
-    //   1. On a slow runner the heading is not rendered yet, so detecting the page
-    //      by its heading misses it and the login silently ends here (the CI logs
-    //      showed zero detections while the URL was the confirmation route).
-    //      → detect by URL.
-    //   2. The primary button renders as **"Loading"** until the org details arrive
+    // `/#/confirm-key-connector-domain` right after the SSO callback. Three traps, all
+    // observed for real:
+    //   1. On a slow runner the heading is not rendered yet, so detecting the page by its
+    //      heading misses it and the login silently ends here (the CI logs showed zero
+    //      detections while the URL was the confirmation route).
+    //   2. A one-shot `page.url()` snapshot is taken *before* the SPA navigates there, and
+    //      `locator.isVisible()` does NOT wait — Playwright ignores its `timeout` ("this
+    //      option is ignored … returns immediately", playwright-core types). On the 2026-10
+    //      runner this block therefore reported **zero** detections while the app sat on the
+    //      confirmation route: nothing was clicked, the client never enrolled its key, the
+    //      token came back without `Key` and every vault step failed for the lack of a key.
+    //      → wait for the app to settle on one of the two routes instead of sampling it.
+    //   3. The primary button renders as **"Loading"** until the org details arrive
     //      and the app does *not* continue on its own. → wait for the real label
     //      (up to 60s) and click it.
-    const confirmHeading = page.getByRole('heading', { name: /Verify your (domain|organi[sz]ation) to log in/ });
-    const onConfirm = page.url().includes('confirm-key-connector')
-        || await confirmHeading.isVisible({ timeout: 15_000 }).catch(() => false);
+    let onConfirm = false;
+    const settleDeadline = Date.now() + 30_000;
+    while (Date.now() < settleDeadline) {
+        const current = page.url();
+        if (current.includes('confirm-key-connector')) { onConfirm = true; break; }
+        // The returning-user path continues on its own; stop waiting for a page that will
+        // not appear.
+        if (/#\/(vault|setup-extension)/.test(current)) break;
+        await page.waitForTimeout(250);
+    }
 
     if (onConfirm) {
         console.log('[ssoLogin] Key Connector confirmation page detected');
